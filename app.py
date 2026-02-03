@@ -8,7 +8,7 @@ import calendar
 # PAGE CONFIG
 # =========================
 st.set_page_config(
-    page_title="💖 Couple Finance",
+    page_title="Budgeting nih y",
     page_icon="💸",
     layout="wide"
 )
@@ -94,7 +94,7 @@ itinerary_df["tanggal"] = pd.to_datetime(itinerary_df["tanggal"], errors="coerce
 # =========================
 # SIDEBAR MENU
 # =========================
-st.sidebar.title("💖 Couple Finance")
+st.sidebar.title("Budgeting nih y")
 menu = st.sidebar.radio(
     "Menu",
     ["🏠 Dashboard", "💰 Income", "📦 Expenses", "🗺️ Itinerary"]
@@ -127,7 +127,7 @@ if menu == "🏠 Dashboard":
     c1, c2, c3 = st.columns(3)
     c1.metric("💰 Total Income", f"Rp {total_income:,.0f}")
     c2.metric("💸 Total Expense", f"Rp {total_expense:,.0f}")
-    c3.metric("💖 Balance", f"Rp {total_income-total_expense:,.0f}")
+    c3.metric("Balance", f"Rp {total_income-total_expense:,.0f}")
 
     st.divider()
     st.subheader("📊 Progress Budget")
