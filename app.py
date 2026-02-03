@@ -18,7 +18,7 @@ conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = conn.cursor()
 
 # =========================
-# CREATE TABLES (SAFE)
+# CREATE TABLES
 # =========================
 cur.execute("""
 CREATE TABLE IF NOT EXISTS expense_category (
@@ -56,15 +56,20 @@ CREATE TABLE IF NOT EXISTS itinerary (
 conn.commit()
 
 # =========================
-# SAFE SQL READER (KEY FIX)
+# SAFE LOAD FUNCTION
 # =========================
-def safe_read_sql(query, columns=None):
+def safe_read_sql(query, columns):
     try:
-        return pd.read_sql(query, conn)
+        df = pd.read_sql(query, conn)
     except Exception:
-        if columns is None:
-            return pd.DataFrame()
-        return pd.DataFrame(columns=columns)
+        df = pd.DataFrame(columns=columns)
+
+    # FORCE SCHEMA
+    for col in columns:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+
+    return df[columns]
 
 # =========================
 # HELPERS
@@ -74,42 +79,52 @@ def calc_duration(start, end):
     return max(int(delta.total_seconds() / 60), 0)
 
 # =========================
-# LOAD DATA (SAFE)
+# LOAD DATA (SCHEMA SAFE)
 # =========================
 category_df = safe_read_sql(
     "SELECT * FROM expense_category",
-    columns=["id", "name", "monthly_budget"]
+    ["id", "name", "monthly_budget"]
 )
 
 income_df_all = safe_read_sql(
     "SELECT * FROM income",
-    columns=["id", "tanggal", "contributor", "account", "amount"]
+    ["id", "tanggal", "contributor", "account", "amount"]
 )
 
 itinerary_df_all = safe_read_sql(
     "SELECT * FROM itinerary",
-    columns=[
-        "id", "tanggal", "activity", "place", "start_time", "end_time",
-        "duration_minutes", "category", "planned_budget", "actual_budget"
+    [
+        "id", "tanggal", "activity", "place",
+        "start_time", "end_time", "duration_minutes",
+        "category", "planned_budget", "actual_budget"
     ]
 )
 
 # =========================
-# GLOBAL FILTER (ANTI CRASH)
+# PARSE DATE SAFELY
+# =========================
+income_df_all["tanggal"] = pd.to_datetime(
+    income_df_all["tanggal"], errors="coerce"
+)
+itinerary_df_all["tanggal"] = pd.to_datetime(
+    itinerary_df_all["tanggal"], errors="coerce"
+)
+
+# =========================
+# GLOBAL FILTER
 # =========================
 st.sidebar.header("Filter Waktu")
 
 all_dates = pd.concat(
     [
-        income_df_all[["tanggal"]] if not income_df_all.empty else pd.DataFrame(),
-        itinerary_df_all[["tanggal"]] if not itinerary_df_all.empty else pd.DataFrame()
+        income_df_all[["tanggal"]],
+        itinerary_df_all[["tanggal"]]
     ],
     ignore_index=True
-)
+).dropna()
 
 if not all_dates.empty:
-    all_dates["tanggal"] = pd.to_datetime(all_dates["tanggal"], errors="coerce")
-    years = sorted(all_dates["tanggal"].dropna().dt.year.unique())
+    years = sorted(all_dates["tanggal"].dt.year.unique())
 else:
     years = [datetime.now().year]
 
@@ -118,14 +133,16 @@ month_name = st.sidebar.selectbox("Bulan", list(calendar.month_name)[1:])
 month = list(calendar.month_name).index(month_name)
 
 # =========================
-# FILTERED DATA
+# FILTER DATA
 # =========================
 income_df = income_df_all[
-    income_df_all["tanggal"].str.startswith(f"{year}-{month:02d}", na=False)
+    (income_df_all["tanggal"].dt.year == year) &
+    (income_df_all["tanggal"].dt.month == month)
 ]
 
 itinerary_df = itinerary_df_all[
-    itinerary_df_all["tanggal"].str.startswith(f"{year}-{month:02d}", na=False)
+    (itinerary_df_all["tanggal"].dt.year == year) &
+    (itinerary_df_all["tanggal"].dt.month == month)
 ]
 
 # =========================
@@ -133,8 +150,8 @@ itinerary_df = itinerary_df_all[
 # =========================
 st.title("Couple Finance Dashboard")
 
-total_income = income_df["amount"].sum() if not income_df.empty else 0
-total_expense = itinerary_df["actual_budget"].sum() if not itinerary_df.empty else 0
+total_income = income_df["amount"].sum()
+total_expense = itinerary_df["actual_budget"].sum()
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Total Income", f"Rp {total_income:,.0f}")
@@ -148,7 +165,9 @@ st.divider()
 # =========================
 st.subheader("Budget Progress")
 
-if not category_df.empty:
+if category_df.empty:
+    st.info("Belum ada kategori expenses")
+else:
     for _, row in category_df.iterrows():
         actual = itinerary_df[
             itinerary_df["category"] == row["name"]
@@ -159,20 +178,20 @@ if not category_df.empty:
 
         st.write(row["name"])
         st.progress(progress)
-        st.caption(f"Planned: Rp {planned:,.0f} | Actual: Rp {actual:,.0f}")
-else:
-    st.info("Belum ada kategori expenses")
+        st.caption(
+            f"Planned: Rp {planned:,.0f} | Actual: Rp {actual:,.0f}"
+        )
 
 # =========================
-# ITINERARY BY DATE
+# ITINERARY PLANNER
 # =========================
 st.divider()
 st.header("Itinerary Planner")
 
 selected_date = st.date_input("Pilih Tanggal")
 
-daily_df = itinerary_df[
-    itinerary_df["tanggal"] == str(selected_date)
+daily_df = itinerary_df_all[
+    itinerary_df_all["tanggal"] == pd.to_datetime(selected_date)
 ]
 
 if not daily_df.empty:
@@ -207,13 +226,12 @@ with st.form("add_itinerary"):
 
     category = st.selectbox(
         "Expense Category",
-        category_df["name"].tolist() if not category_df.empty else []
+        category_df["name"].tolist()
     )
 
-    planned_budget = (
-        category_df[category_df["name"] == category]["monthly_budget"].values[0]
-        if not category_df.empty and category else 0
-    )
+    planned_budget = category_df[
+        category_df["name"] == category
+    ]["monthly_budget"].values[0]
 
     actual_budget = st.number_input("Budget Aktual", min_value=0.0)
 
