@@ -13,11 +13,15 @@ st.set_page_config(
 )
 
 DB_PATH = "app.db"
+
+# =========================
+# DATABASE CONNECTION
+# =========================
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = conn.cursor()
 
 # =========================
-# DATABASE
+# TABLE CREATION
 # =========================
 cur.execute("""
 CREATE TABLE IF NOT EXISTS expense_category (
@@ -57,26 +61,41 @@ conn.commit()
 # =========================
 # HELPERS
 # =========================
-def load_df(q):
-    return pd.read_sql(q, conn)
+def load_df(query):
+    return pd.read_sql(query, conn)
+
+def table_exists(name):
+    q = f"""
+    SELECT name FROM sqlite_master
+    WHERE type='table' AND name='{name}'
+    """
+    return not load_df(q).empty
+
+def safe_load_dates():
+    dfs = []
+    if table_exists("itinerary"):
+        dfs.append(load_df("SELECT tanggal FROM itinerary"))
+    if table_exists("income"):
+        dfs.append(load_df("SELECT tanggal FROM income"))
+
+    if dfs:
+        df = pd.concat(dfs, ignore_index=True)
+        df["tanggal"] = pd.to_datetime(df["tanggal"])
+        return df
+    return pd.DataFrame(columns=["tanggal"])
 
 def calc_duration(start, end):
     delta = datetime.combine(date.today(), end) - datetime.combine(date.today(), start)
-    return int(delta.total_seconds() / 60)
+    return max(int(delta.total_seconds() / 60), 0)
 
 # =========================
 # GLOBAL TIME FILTER
 # =========================
 st.sidebar.header("Filter Waktu")
 
-dates_df = load_df("""
-SELECT tanggal FROM itinerary
-UNION
-SELECT tanggal FROM income
-""")
+dates_df = safe_load_dates()
 
 if not dates_df.empty:
-    dates_df["tanggal"] = pd.to_datetime(dates_df["tanggal"])
     years = sorted(dates_df["tanggal"].dt.year.unique())
 else:
     years = [datetime.now().year]
@@ -122,13 +141,22 @@ st.divider()
 # =========================
 st.subheader("Budget Progress")
 
-for _, row in category_df.iterrows():
-    actual = itinerary_df[itinerary_df["category"] == row["name"]]["actual_budget"].sum()
-    planned = row["monthly_budget"]
-    progress = min(actual / planned, 1) if planned > 0 else 0
-    st.write(row["name"])
-    st.progress(progress)
-    st.caption(f"Planned: Rp {planned:,.0f} | Actual: Rp {actual:,.0f}")
+if not category_df.empty:
+    for _, row in category_df.iterrows():
+        actual = itinerary_df[
+            itinerary_df["category"] == row["name"]
+        ]["actual_budget"].sum()
+
+        planned = row["monthly_budget"]
+        progress = min(actual / planned, 1) if planned > 0 else 0
+
+        st.write(row["name"])
+        st.progress(progress)
+        st.caption(
+            f"Planned: Rp {planned:,.0f} | Actual: Rp {actual:,.0f}"
+        )
+else:
+    st.info("Belum ada kategori expenses")
 
 # =========================
 # ITINERARY BY DATE
@@ -138,14 +166,19 @@ st.header("Itinerary Planner")
 
 selected_date = st.date_input("Pilih Tanggal")
 
-daily_df = itinerary_df[itinerary_df["tanggal"] == str(selected_date)]
+daily_df = itinerary_df[
+    itinerary_df["tanggal"] == str(selected_date)
+]
 
 if not daily_df.empty:
     st.subheader("Agenda Hari Ini")
     st.dataframe(
         daily_df[
-            ["activity", "place", "start_time", "end_time",
-             "duration_minutes", "category", "planned_budget", "actual_budget"]
+            [
+                "activity", "place", "start_time", "end_time",
+                "duration_minutes", "category",
+                "planned_budget", "actual_budget"
+            ]
         ],
         use_container_width=True
     )
@@ -173,9 +206,11 @@ with st.form("add_itinerary"):
         category_df["name"].tolist() if not category_df.empty else []
     )
 
-    planned_budget = category_df[
-        category_df["name"] == category
-    ]["monthly_budget"].values[0] if not category_df.empty else 0
+    planned_budget = 0
+    if not category_df.empty and category:
+        planned_budget = category_df[
+            category_df["name"] == category
+        ]["monthly_budget"].values[0]
 
     actual_budget = st.number_input("Budget Aktual", min_value=0.0)
 
