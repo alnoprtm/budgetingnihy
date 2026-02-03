@@ -7,21 +7,18 @@ import calendar
 # =========================
 # CONFIG
 # =========================
-st.set_page_config(
-    page_title="Couple Finance",
-    layout="wide"
-)
+st.set_page_config(page_title="Couple Finance", layout="wide")
 
 DB_PATH = "app.db"
 
 # =========================
-# DATABASE CONNECTION
+# DB CONNECTION
 # =========================
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = conn.cursor()
 
 # =========================
-# TABLE CREATION
+# CREATE TABLES (SAFE)
 # =========================
 cur.execute("""
 CREATE TABLE IF NOT EXISTS expense_category (
@@ -34,7 +31,7 @@ CREATE TABLE IF NOT EXISTS expense_category (
 cur.execute("""
 CREATE TABLE IF NOT EXISTS income (
     id INTEGER PRIMARY KEY,
-    tanggal DATE,
+    tanggal TEXT,
     contributor TEXT,
     account TEXT,
     amount REAL
@@ -44,7 +41,7 @@ CREATE TABLE IF NOT EXISTS income (
 cur.execute("""
 CREATE TABLE IF NOT EXISTS itinerary (
     id INTEGER PRIMARY KEY,
-    tanggal DATE,
+    tanggal TEXT,
     activity TEXT,
     place TEXT,
     start_time TEXT,
@@ -59,44 +56,60 @@ CREATE TABLE IF NOT EXISTS itinerary (
 conn.commit()
 
 # =========================
+# SAFE SQL READER (KEY FIX)
+# =========================
+def safe_read_sql(query, columns=None):
+    try:
+        return pd.read_sql(query, conn)
+    except Exception:
+        if columns is None:
+            return pd.DataFrame()
+        return pd.DataFrame(columns=columns)
+
+# =========================
 # HELPERS
 # =========================
-def load_df(query):
-    return pd.read_sql(query, conn)
-
-def table_exists(name):
-    q = f"""
-    SELECT name FROM sqlite_master
-    WHERE type='table' AND name='{name}'
-    """
-    return not load_df(q).empty
-
-def safe_load_dates():
-    dfs = []
-    if table_exists("itinerary"):
-        dfs.append(load_df("SELECT tanggal FROM itinerary"))
-    if table_exists("income"):
-        dfs.append(load_df("SELECT tanggal FROM income"))
-
-    if dfs:
-        df = pd.concat(dfs, ignore_index=True)
-        df["tanggal"] = pd.to_datetime(df["tanggal"])
-        return df
-    return pd.DataFrame(columns=["tanggal"])
-
 def calc_duration(start, end):
     delta = datetime.combine(date.today(), end) - datetime.combine(date.today(), start)
     return max(int(delta.total_seconds() / 60), 0)
 
 # =========================
-# GLOBAL TIME FILTER
+# LOAD DATA (SAFE)
+# =========================
+category_df = safe_read_sql(
+    "SELECT * FROM expense_category",
+    columns=["id", "name", "monthly_budget"]
+)
+
+income_df_all = safe_read_sql(
+    "SELECT * FROM income",
+    columns=["id", "tanggal", "contributor", "account", "amount"]
+)
+
+itinerary_df_all = safe_read_sql(
+    "SELECT * FROM itinerary",
+    columns=[
+        "id", "tanggal", "activity", "place", "start_time", "end_time",
+        "duration_minutes", "category", "planned_budget", "actual_budget"
+    ]
+)
+
+# =========================
+# GLOBAL FILTER (ANTI CRASH)
 # =========================
 st.sidebar.header("Filter Waktu")
 
-dates_df = safe_load_dates()
+all_dates = pd.concat(
+    [
+        income_df_all[["tanggal"]] if not income_df_all.empty else pd.DataFrame(),
+        itinerary_df_all[["tanggal"]] if not itinerary_df_all.empty else pd.DataFrame()
+    ],
+    ignore_index=True
+)
 
-if not dates_df.empty:
-    years = sorted(dates_df["tanggal"].dt.year.unique())
+if not all_dates.empty:
+    all_dates["tanggal"] = pd.to_datetime(all_dates["tanggal"], errors="coerce")
+    years = sorted(all_dates["tanggal"].dropna().dt.year.unique())
 else:
     years = [datetime.now().year]
 
@@ -105,21 +118,15 @@ month_name = st.sidebar.selectbox("Bulan", list(calendar.month_name)[1:])
 month = list(calendar.month_name).index(month_name)
 
 # =========================
-# LOAD DATA
+# FILTERED DATA
 # =========================
-category_df = load_df("SELECT * FROM expense_category")
+income_df = income_df_all[
+    income_df_all["tanggal"].str.startswith(f"{year}-{month:02d}", na=False)
+]
 
-itinerary_df = load_df(f"""
-SELECT * FROM itinerary
-WHERE strftime('%Y', tanggal)='{year}'
-AND strftime('%m', tanggal)='{month:02d}'
-""")
-
-income_df = load_df(f"""
-SELECT * FROM income
-WHERE strftime('%Y', tanggal)='{year}'
-AND strftime('%m', tanggal)='{month:02d}'
-""")
+itinerary_df = itinerary_df_all[
+    itinerary_df_all["tanggal"].str.startswith(f"{year}-{month:02d}", na=False)
+]
 
 # =========================
 # DASHBOARD
@@ -152,9 +159,7 @@ if not category_df.empty:
 
         st.write(row["name"])
         st.progress(progress)
-        st.caption(
-            f"Planned: Rp {planned:,.0f} | Actual: Rp {actual:,.0f}"
-        )
+        st.caption(f"Planned: Rp {planned:,.0f} | Actual: Rp {actual:,.0f}")
 else:
     st.info("Belum ada kategori expenses")
 
@@ -171,7 +176,6 @@ daily_df = itinerary_df[
 ]
 
 if not daily_df.empty:
-    st.subheader("Agenda Hari Ini")
     st.dataframe(
         daily_df[
             [
@@ -206,11 +210,10 @@ with st.form("add_itinerary"):
         category_df["name"].tolist() if not category_df.empty else []
     )
 
-    planned_budget = 0
-    if not category_df.empty and category:
-        planned_budget = category_df[
-            category_df["name"] == category
-        ]["monthly_budget"].values[0]
+    planned_budget = (
+        category_df[category_df["name"] == category]["monthly_budget"].values[0]
+        if not category_df.empty and category else 0
+    )
 
     actual_budget = st.number_input("Budget Aktual", min_value=0.0)
 
@@ -223,7 +226,7 @@ with st.form("add_itinerary"):
             NULL,?,?,?,?,?,?,?,?,?
         )
         """, (
-            selected_date,
+            str(selected_date),
             activity,
             place,
             start.strftime("%H:%M"),
@@ -242,19 +245,10 @@ with st.form("add_itinerary"):
 st.divider()
 st.header("Export")
 
-export = {
-    "Itinerary": itinerary_df,
-    "Income": income_df,
-    "Expense Category": category_df
-}
-
 with pd.ExcelWriter("export.xlsx", engine="xlsxwriter") as writer:
-    for k, v in export.items():
-        v.to_excel(writer, sheet_name=k, index=False)
+    itinerary_df.to_excel(writer, sheet_name="Itinerary", index=False)
+    income_df.to_excel(writer, sheet_name="Income", index=False)
+    category_df.to_excel(writer, sheet_name="Expense Category", index=False)
 
 with open("export.xlsx", "rb") as f:
-    st.download_button(
-        "Download Excel",
-        f,
-        file_name="couple_finance.xlsx"
-    )
+    st.download_button("Download Excel", f, file_name="couple_finance.xlsx")
