@@ -1,338 +1,225 @@
-# ===============================
-# app.py
-# Couple Budgeting & Itinerary App (FINAL)
-# Author: Alnobest Son Pratama
-# ===============================
-
 import streamlit as st
-import pandas as pd
 import sqlite3
-import hashlib
-from datetime import datetime
-import os
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
+import pandas as pd
+from datetime import date, datetime, time
+import calendar
 
-# -------------------------------
+# =========================
 # CONFIG
-# -------------------------------
-st.set_page_config(page_title="Couple Finance", layout="wide")
+# =========================
+st.set_page_config(
+    page_title="Couple Finance",
+    layout="wide"
+)
 
 DB_PATH = "app.db"
-BACKUP_DIR = "backups"
-REPORT_DIR = "reports"
-
-os.makedirs(BACKUP_DIR, exist_ok=True)
-os.makedirs(REPORT_DIR, exist_ok=True)
-
-# -------------------------------
-# DATABASE CONNECTION
-# -------------------------------
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-c = conn.cursor()
+cur = conn.cursor()
 
-# -------------------------------
-# TABLES
-# -------------------------------
-c.execute("""
+# =========================
+# DATABASE
+# =========================
+cur.execute("""
+CREATE TABLE IF NOT EXISTS expense_category (
+    id INTEGER PRIMARY KEY,
+    name TEXT,
+    monthly_budget REAL
+)
+""")
+
+cur.execute("""
 CREATE TABLE IF NOT EXISTS income (
-    date TEXT,
+    id INTEGER PRIMARY KEY,
+    tanggal DATE,
+    contributor TEXT,
     account TEXT,
-    source TEXT,
-    amount REAL,
-    contributor TEXT
+    amount REAL
 )
 """)
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS expenses (
-    date TEXT,
-    category TEXT,
-    amount REAL,
-    account TEXT,
-    itinerary TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS savings (
-    date TEXT,
-    amount REAL,
-    account TEXT,
-    note TEXT
-)
-""")
-
-c.execute("""
+cur.execute("""
 CREATE TABLE IF NOT EXISTS itinerary (
-    date TEXT,
+    id INTEGER PRIMARY KEY,
+    tanggal DATE,
     activity TEXT,
+    place TEXT,
+    start_time TEXT,
+    end_time TEXT,
+    duration_minutes INTEGER,
+    category TEXT,
     planned_budget REAL,
-    actual_expense REAL
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS budget (
-    category TEXT PRIMARY KEY,
-    limit_amount REAL
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
+    actual_budget REAL
 )
 """)
 
 conn.commit()
 
-# -------------------------------
-# AUTH (PIN)
-# -------------------------------
-def hash_pin(pin):
-    return hashlib.sha256(pin.encode()).hexdigest()
+# =========================
+# HELPERS
+# =========================
+def load_df(q):
+    return pd.read_sql(q, conn)
 
-def get_setting(key):
-    row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-    return row[0] if row else None
+def calc_duration(start, end):
+    delta = datetime.combine(date.today(), end) - datetime.combine(date.today(), start)
+    return int(delta.total_seconds() / 60)
 
-def set_setting(key, value):
-    c.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, value))
-    conn.commit()
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-stored_pin = get_setting("pin_hash")
-
-if not stored_pin:
-    st.title("Set PIN")
-    pin = st.text_input("Create PIN", type="password")
-    if st.button("Save PIN"):
-        set_setting("pin_hash", hash_pin(pin))
-        st.success("PIN saved. Reload the app.")
-    st.stop()
-
-if not st.session_state.authenticated:
-    st.title("Login")
-    pin = st.text_input("Enter PIN", type="password")
-    if st.button("Login"):
-        if hash_pin(pin) == stored_pin:
-            st.session_state.authenticated = True
-        else:
-            st.error("Wrong PIN")
-    st.stop()
-
-# -------------------------------
+# =========================
 # GLOBAL TIME FILTER
-# -------------------------------
-st.sidebar.header("Time Filter")
+# =========================
+st.sidebar.header("Filter Waktu")
 
-current_year = datetime.now().year
-current_month = datetime.now().month
+dates_df = load_df("""
+SELECT tanggal FROM itinerary
+UNION
+SELECT tanggal FROM income
+""")
 
-year = st.sidebar.selectbox("Year", list(range(2020, current_year + 1)), index=current_year - 2020)
-month = st.sidebar.selectbox("Month", list(range(1, 13)), index=current_month - 1)
-
-start_date = f"{year}-{month:02d}-01"
-end_date = f"{year}-{month:02d}-31"
-
-# -------------------------------
-# AUTO MONTHLY BACKUP
-# -------------------------------
-backup_key = f"backup_{year}_{month}"
-
-if not get_setting(backup_key):
-    path = f"{BACKUP_DIR}/backup_{year}_{month}.xlsx"
-    writer = pd.ExcelWriter(path, engine="xlsxwriter")
-
-    pd.read_sql("SELECT * FROM income", conn).to_excel(writer, "Income", index=False)
-    pd.read_sql("SELECT * FROM expenses", conn).to_excel(writer, "Expenses", index=False)
-    pd.read_sql("SELECT * FROM savings", conn).to_excel(writer, "Savings", index=False)
-    pd.read_sql("SELECT * FROM itinerary", conn).to_excel(writer, "Itinerary", index=False)
-
-    writer.close()
-    set_setting(backup_key, "done")
-
-# -------------------------------
-# OVER-BUDGET CHECK
-# -------------------------------
-budget_df = pd.read_sql("SELECT * FROM budget", conn)
-expense_df = pd.read_sql(
-    f"""
-    SELECT category, SUM(amount) total
-    FROM expenses
-    WHERE date BETWEEN '{start_date}' AND '{end_date}'
-    GROUP BY category
-    """,
-    conn
-)
-
-merged = pd.merge(budget_df, expense_df, on="category", how="left").fillna(0)
-over_budget = merged[merged["total"] > merged["limit_amount"]]
-
-if not over_budget.empty:
-    st.sidebar.warning("Over-budget detected")
-
-# -------------------------------
-# PDF REPORT
-# -------------------------------
-def generate_pdf():
-    file_path = f"{REPORT_DIR}/report_{year}_{month}.pdf"
-    doc = SimpleDocTemplate(file_path)
-    styles = getSampleStyleSheet()
-    story = []
-
-    income = pd.read_sql(
-        f"SELECT SUM(amount) total FROM income WHERE date BETWEEN '{start_date}' AND '{end_date}'",
-        conn
-    )["total"][0] or 0
-
-    expenses = pd.read_sql(
-        f"SELECT SUM(amount) total FROM expenses WHERE date BETWEEN '{start_date}' AND '{end_date}'",
-        conn
-    )["total"][0] or 0
-
-    savings = pd.read_sql(
-        f"SELECT SUM(amount) total FROM savings WHERE date BETWEEN '{start_date}' AND '{end_date}'",
-        conn
-    )["total"][0] or 0
-
-    story.append(Paragraph(f"Monthly Report {month}/{year}", styles["Title"]))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Total Income: Rp {income:,.0f}", styles["Normal"]))
-    story.append(Paragraph(f"Total Expenses: Rp {expenses:,.0f}", styles["Normal"]))
-    story.append(Paragraph(f"Total Savings: Rp {savings:,.0f}", styles["Normal"]))
-
-    doc.build(story)
-    return file_path
-
-# -------------------------------
-# MANUAL EXPORT
-# -------------------------------
-def export_excel():
-    path = f"{BACKUP_DIR}/manual_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    writer = pd.ExcelWriter(path, engine="xlsxwriter")
-
-    pd.read_sql("SELECT * FROM income", conn).to_excel(writer, "Income", index=False)
-    pd.read_sql("SELECT * FROM expenses", conn).to_excel(writer, "Expenses", index=False)
-    pd.read_sql("SELECT * FROM savings", conn).to_excel(writer, "Savings", index=False)
-    pd.read_sql("SELECT * FROM itinerary", conn).to_excel(writer, "Itinerary", index=False)
-
-    writer.close()
-    return path
-
-# -------------------------------
-# UI
-# -------------------------------
-st.title("Couple Budgeting & Itinerary App")
-
-menu = st.sidebar.radio(
-    "Menu",
-    ["Dashboard", "Income", "Expenses", "Savings", "Itinerary", "Reports"]
-)
-
-if menu == "Income":
-    st.header("Income")
-    with st.form("income_form"):
-        date = st.date_input("Date")
-        account = st.text_input("Account")
-        source = st.text_input("Source")
-        amount = st.number_input("Amount", min_value=0.0)
-        contributor = st.selectbox("Contributor", ["You", "Partner"])
-        if st.form_submit_button("Add"):
-            c.execute(
-                "INSERT INTO income VALUES (?,?,?,?,?)",
-                (date, account, source, amount, contributor)
-            )
-            conn.commit()
-    st.dataframe(pd.read_sql("SELECT * FROM income", conn))
-
-elif menu == "Expenses":
-    st.header("Expenses")
-    with st.form("expense_form"):
-        date = st.date_input("Date")
-        category = st.text_input("Category")
-        amount = st.number_input("Amount", min_value=0.0)
-        account = st.text_input("Account")
-        itinerary = st.text_input("Itinerary")
-        if st.form_submit_button("Add"):
-            c.execute(
-                "INSERT INTO expenses VALUES (?,?,?,?,?)",
-                (date, category, amount, account, itinerary)
-            )
-            conn.commit()
-    st.dataframe(pd.read_sql("SELECT * FROM expenses", conn))
-
-elif menu == "Savings":
-    st.header("Savings")
-    with st.form("savings_form"):
-        date = st.date_input("Date")
-        amount = st.number_input("Amount", min_value=0.0)
-        account = st.text_input("Account")
-        note = st.text_input("Note")
-        if st.form_submit_button("Add"):
-            c.execute(
-                "INSERT INTO savings VALUES (?,?,?,?)",
-                (date, amount, account, note)
-            )
-            conn.commit()
-    st.dataframe(pd.read_sql("SELECT * FROM savings", conn))
-
-elif menu == "Itinerary":
-    st.header("Itinerary")
-    with st.form("itinerary_form"):
-        date = st.date_input("Date")
-        activity = st.text_input("Activity")
-        planned = st.number_input("Planned Budget", min_value=0.0)
-        actual = st.number_input("Actual Expense", min_value=0.0)
-        if st.form_submit_button("Add"):
-            c.execute(
-                "INSERT INTO itinerary VALUES (?,?,?,?)",
-                (date, activity, planned, actual)
-            )
-            conn.commit()
-    st.dataframe(pd.read_sql("SELECT * FROM itinerary", conn))
-
-elif menu == "Reports":
-    st.header("Reports")
-    if st.button("Generate Monthly PDF"):
-        pdf_path = generate_pdf()
-        with open(pdf_path, "rb") as f:
-            st.download_button("Download PDF", f, file_name=os.path.basename(pdf_path))
-
-    if st.button("Export Excel"):
-        excel_path = export_excel()
-        with open(excel_path, "rb") as f:
-            st.download_button("Download Excel", f, file_name=os.path.basename(excel_path))
-
+if not dates_df.empty:
+    dates_df["tanggal"] = pd.to_datetime(dates_df["tanggal"])
+    years = sorted(dates_df["tanggal"].dt.year.unique())
 else:
-    st.header("Dashboard")
+    years = [datetime.now().year]
 
-    income_total = pd.read_sql(
-        f"SELECT SUM(amount) total FROM income WHERE date BETWEEN '{start_date}' AND '{end_date}'",
-        conn
-    )["total"][0] or 0
+year = st.sidebar.selectbox("Tahun", years)
+month_name = st.sidebar.selectbox("Bulan", list(calendar.month_name)[1:])
+month = list(calendar.month_name).index(month_name)
 
-    expense_total = pd.read_sql(
-        f"SELECT SUM(amount) total FROM expenses WHERE date BETWEEN '{start_date}' AND '{end_date}'",
-        conn
-    )["total"][0] or 0
+# =========================
+# LOAD DATA
+# =========================
+category_df = load_df("SELECT * FROM expense_category")
 
-    savings_total = pd.read_sql(
-        f"SELECT SUM(amount) total FROM savings WHERE date BETWEEN '{start_date}' AND '{end_date}'",
-        conn
-    )["total"][0] or 0
+itinerary_df = load_df(f"""
+SELECT * FROM itinerary
+WHERE strftime('%Y', tanggal)='{year}'
+AND strftime('%m', tanggal)='{month:02d}'
+""")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Income", f"Rp {income_total:,.0f}")
-    col2.metric("Expenses", f"Rp {expense_total:,.0f}")
-    col3.metric("Savings", f"Rp {savings_total:,.0f}")
+income_df = load_df(f"""
+SELECT * FROM income
+WHERE strftime('%Y', tanggal)='{year}'
+AND strftime('%m', tanggal)='{month:02d}'
+""")
 
-    chart = pd.read_sql(
-        "SELECT contributor, SUM(amount) amount FROM income GROUP BY contributor",
-        conn
+# =========================
+# DASHBOARD
+# =========================
+st.title("Couple Finance Dashboard")
+
+total_income = income_df["amount"].sum() if not income_df.empty else 0
+total_expense = itinerary_df["actual_budget"].sum() if not itinerary_df.empty else 0
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Total Income", f"Rp {total_income:,.0f}")
+c2.metric("Total Expense", f"Rp {total_expense:,.0f}")
+c3.metric("Balance", f"Rp {total_income - total_expense:,.0f}")
+
+st.divider()
+
+# =========================
+# EXPENSE PROGRESS
+# =========================
+st.subheader("Budget Progress")
+
+for _, row in category_df.iterrows():
+    actual = itinerary_df[itinerary_df["category"] == row["name"]]["actual_budget"].sum()
+    planned = row["monthly_budget"]
+    progress = min(actual / planned, 1) if planned > 0 else 0
+    st.write(row["name"])
+    st.progress(progress)
+    st.caption(f"Planned: Rp {planned:,.0f} | Actual: Rp {actual:,.0f}")
+
+# =========================
+# ITINERARY BY DATE
+# =========================
+st.divider()
+st.header("Itinerary Planner")
+
+selected_date = st.date_input("Pilih Tanggal")
+
+daily_df = itinerary_df[itinerary_df["tanggal"] == str(selected_date)]
+
+if not daily_df.empty:
+    st.subheader("Agenda Hari Ini")
+    st.dataframe(
+        daily_df[
+            ["activity", "place", "start_time", "end_time",
+             "duration_minutes", "category", "planned_budget", "actual_budget"]
+        ],
+        use_container_width=True
     )
-    st.bar_chart(chart.set_index("contributor"))
+else:
+    st.info("Belum ada itinerary di tanggal ini")
+
+# =========================
+# ADD ITINERARY
+# =========================
+st.subheader("Tambah Kegiatan")
+
+with st.form("add_itinerary"):
+    c1, c2 = st.columns(2)
+    activity = c1.text_input("Nama Kegiatan")
+    place = c2.text_input("Tempat")
+
+    c3, c4 = st.columns(2)
+    start = c3.time_input("Mulai", time(9, 0))
+    end = c4.time_input("Selesai", time(10, 0))
+
+    duration = calc_duration(start, end)
+
+    category = st.selectbox(
+        "Expense Category",
+        category_df["name"].tolist() if not category_df.empty else []
+    )
+
+    planned_budget = category_df[
+        category_df["name"] == category
+    ]["monthly_budget"].values[0] if not category_df.empty else 0
+
+    actual_budget = st.number_input("Budget Aktual", min_value=0.0)
+
+    st.caption(f"Estimasi Waktu: {duration} menit")
+    st.caption(f"Estimasi Budget (Planned): Rp {planned_budget:,.0f}")
+
+    if st.form_submit_button("Simpan Itinerary"):
+        cur.execute("""
+        INSERT INTO itinerary VALUES (
+            NULL,?,?,?,?,?,?,?,?,?
+        )
+        """, (
+            selected_date,
+            activity,
+            place,
+            start.strftime("%H:%M"),
+            end.strftime("%H:%M"),
+            duration,
+            category,
+            planned_budget,
+            actual_budget
+        ))
+        conn.commit()
+        st.success("Itinerary berhasil ditambahkan")
+
+# =========================
+# EXPORT
+# =========================
+st.divider()
+st.header("Export")
+
+export = {
+    "Itinerary": itinerary_df,
+    "Income": income_df,
+    "Expense Category": category_df
+}
+
+with pd.ExcelWriter("export.xlsx", engine="xlsxwriter") as writer:
+    for k, v in export.items():
+        v.to_excel(writer, sheet_name=k, index=False)
+
+with open("export.xlsx", "rb") as f:
+    st.download_button(
+        "Download Excel",
+        f,
+        file_name="couple_finance.xlsx"
+    )
